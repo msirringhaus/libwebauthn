@@ -4,3 +4,7 @@ target
 # Virtual key state
 solo/resident_keys.bin
 solo/authenticator_state.bin
+
+# NK3 USB/IP runner files
+nohup.out
+usbip-runner-v*
