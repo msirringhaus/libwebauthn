@@ -41,7 +41,6 @@ pub struct MakeCredentialResponse {
     pub authenticator_data: AuthenticatorData<MakeCredentialsResponseExtensions>,
     pub attestation_statement: Ctap2AttestationStatement,
     pub enterprise_attestation: Option<bool>,
-    pub large_blob_key: Option<Vec<u8>>,
     pub unsigned_extensions_output: MakeCredentialsResponseUnsignedExtensions,
 }
 
@@ -287,6 +286,11 @@ impl MakeCredentialsResponseUnsignedExtensions {
             None | Some(MakeCredentialLargeBlobExtension::None) => None, // Not requested, so we don't give an answer
             Some(MakeCredentialLargeBlobExtension::Preferred)
             | Some(MakeCredentialLargeBlobExtension::Required) => {
+                // TODO: In the case of using the CTAP 2.2 'largeBlob'-extension,
+                //       the authenticator should populate the unsigned extensions
+                //       in it's own response.
+                //       We don't yet support unsignedExtensionOutputs (0x06), so
+                //       we fill this ourselves for both extensions (CTAP 2.1 and 2.2)
                 if info.map(|x| x.option_enabled("largeBlobs")) == Some(true) {
                     Some(MakeCredentialLargeBlobExtensionOutput {
                         supported: Some(true),
@@ -527,6 +531,16 @@ pub enum MakeCredentialLargeBlobExtension {
     #[default]
     #[serde(other)]
     None,
+}
+
+impl MakeCredentialLargeBlobExtension {
+    pub(crate) fn to_string(&self) -> Option<String> {
+        match self {
+            MakeCredentialLargeBlobExtension::None => None,
+            MakeCredentialLargeBlobExtension::Preferred => Some("preferred".to_string()),
+            MakeCredentialLargeBlobExtension::Required => Some("required".to_string()),
+        }
+    }
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]

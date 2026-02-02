@@ -6,6 +6,7 @@ use tracing::{debug, error, trace};
 
 use crate::{
     fido::AuthenticatorData,
+    management::LargeBlobKeyExtension,
     ops::webauthn::{
         client_data::ClientData,
         idl::{
@@ -24,10 +25,12 @@ use crate::{
     },
     pin::PinUvAuthProtocol,
     proto::ctap2::{
-        Ctap2AttestationStatement, Ctap2GetAssertionResponseExtensions,
-        Ctap2PublicKeyCredentialDescriptor, Ctap2PublicKeyCredentialUserEntity,
+        Ctap2AttestationStatement, Ctap2GetAssertionResponse, Ctap2GetAssertionResponseExtensions,
+        Ctap2LargeBlobArrayElement, Ctap2PublicKeyCredentialDescriptor,
+        Ctap2PublicKeyCredentialUserEntity,
     },
-    webauthn::CtapError,
+    transport::Channel,
+    webauthn::{CtapError, Error},
 };
 
 use super::timeout::DEFAULT_TIMEOUT;
@@ -283,8 +286,7 @@ impl TryFrom<HmacGetSecretInputJson> for HMACGetSecretInput {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GetAssertionLargeBlobExtension {
     Read,
-    // Not yet supported
-    // Write(Vec<u8>),
+    Write(Vec<u8>),
 }
 
 impl TryFrom<LargeBlobInputJson> for GetAssertionLargeBlobExtension {
@@ -307,9 +309,68 @@ impl TryFrom<LargeBlobInputJson> for GetAssertionLargeBlobExtension {
 pub struct GetAssertionLargeBlobExtensionOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub blob: Option<Vec<u8>>,
-    // Not yet supported
-    // #[serde(skip_serializing_if = "Option::is_none")]
-    // pub written: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub written: Option<bool>,
+}
+
+impl GetAssertionLargeBlobExtensionOutput {
+    pub(crate) async fn from_ctap2_output<C: Channel>(
+        channel: &mut C,
+        request: &GetAssertionRequest,
+        response: &Ctap2GetAssertionResponse,
+    ) -> Result<Option<Self>, Error> {
+        let mut large_blob_array = channel.get_large_blobs_array(request.timeout).await?;
+        let res = if let (Some(key), Some(extensions)) =
+            (&response.large_blob_key, request.extensions.as_ref())
+        {
+            match &extensions.large_blob {
+                Some(GetAssertionLargeBlobExtension::Read) => {
+                    let mut res = None;
+                    // Only for CTAP 2.1 largeBlobKey-extension do we have to do anything here.
+                    // The authenticator handles the CTAP 2.2 largeBlob-extension by itself.
+                    // TODO: However we do not yet support unsigned_extensions in GetAssertionResponses. Once we do, `into_assertion_output()` should map
+                    // the content for us in the CTAP 2.2 'largeBlob'-case.
+                    for element in large_blob_array {
+                        let associated_blob = element.try_decrypt_large_blob(key)?;
+                        // Skipping all entries that are `None`. There can be only one blob for a credential.
+                        if let Some(blob) = associated_blob {
+                            res = Some(GetAssertionLargeBlobExtensionOutput {
+                                blob: Some(blob),
+                                written: None,
+                            });
+                            break;
+                        }
+                    }
+                    res
+                }
+                Some(GetAssertionLargeBlobExtension::Write(orig_data)) => {
+                    let new_blob =
+                        Ctap2LargeBlobArrayElement::try_encrypt_large_blob(key, orig_data)?;
+                    // Checking if we have to update the blob or add a new one
+                    if let Some(idx) = large_blob_array
+                        .iter()
+                        .position(|e| matches!(e.try_decrypt_large_blob(key), Ok(Some(_))))
+                    {
+                        // Updating
+                        large_blob_array[idx] = new_blob;
+                    } else {
+                        large_blob_array.push(new_blob);
+                    }
+                    channel
+                        .set_large_blobs_array(&large_blob_array, request.timeout)
+                        .await?;
+                    Some(GetAssertionLargeBlobExtensionOutput {
+                        blob: None,
+                        written: Some(true),
+                    })
+                }
+                None => None,
+            }
+        } else {
+            None
+        };
+        Ok(res)
+    }
 }
 
 #[derive(Debug, Default, Clone, PartialEq)]

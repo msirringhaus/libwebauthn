@@ -6,3 +6,6 @@ pub use authenticator_config::AuthenticatorConfig;
 
 mod credential_management;
 pub use credential_management::CredentialManagement;
+
+mod large_blobs;
+pub use large_blobs::LargeBlobKeyExtension;

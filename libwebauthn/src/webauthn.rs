@@ -6,7 +6,10 @@ use tracing::{debug, error, info, instrument, trace, warn};
 
 use crate::fido::FidoProtocol;
 use crate::ops::u2f::{RegisterRequest, SignRequest, UpgradableResponse};
-use crate::ops::webauthn::{DowngradableRequest, GetAssertionRequest, GetAssertionResponse};
+use crate::ops::webauthn::{
+    DowngradableRequest, GetAssertionLargeBlobExtensionOutput, GetAssertionRequest,
+    GetAssertionResponse,
+};
 use crate::ops::webauthn::{MakeCredentialRequest, MakeCredentialResponse};
 use crate::proto::ctap1::Ctap1;
 use crate::proto::ctap2::preflight::ctap2_preflight;
@@ -228,12 +231,24 @@ where
             )
         }?;
         let count = response.credentials_count.unwrap_or(1);
-        let mut assertions = vec![response.into_assertion_output(op, self.get_auth_data())];
+        let mut ctap2_assertions = vec![response];
         for i in 1..count {
             debug!({ i }, "Fetching additional credential");
             // GetNextAssertion doesn't use PinUVAuthToken, so we don't need to check uv_auth_used here
             let response = self.ctap2_get_next_assertion(op.timeout).await?;
-            assertions.push(response.into_assertion_output(op, self.get_auth_data()));
+            ctap2_assertions.push(response);
+        }
+
+        let mut assertions = Vec::new();
+        for ctap2_assertion in ctap2_assertions {
+            let large_blob =
+                GetAssertionLargeBlobExtensionOutput::from_ctap2_output(self, op, &ctap2_assertion)
+                    .await?;
+            assertions.push(ctap2_assertion.into_assertion_output(
+                op,
+                self.get_auth_data(),
+                large_blob,
+            )?)
         }
         Ok(assertions.as_slice().into())
     }

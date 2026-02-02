@@ -33,6 +33,10 @@ pub use model::{
     Ctap2GetAssertionRequest, Ctap2GetAssertionResponse, Ctap2GetAssertionResponseExtensions,
 };
 pub use model::{
+    Ctap2LargeBlobArrayElement, Ctap2LargeBlobsRequest, Ctap2LargeBlobsResponse,
+    Ctap2SerializedLargeBlobArray,
+};
+pub use model::{
     Ctap2MakeCredentialRequest, Ctap2MakeCredentialResponse, Ctap2MakeCredentialsResponseExtensions,
 };
 pub mod preflight;

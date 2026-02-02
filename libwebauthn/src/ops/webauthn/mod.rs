@@ -22,10 +22,11 @@ pub use idl::{
 };
 pub use make_credential::{
     CredentialPropsExtension, CredentialProtectionExtension, CredentialProtectionPolicy,
-    MakeCredentialLargeBlobExtension, MakeCredentialLargeBlobExtensionOutput,
-    MakeCredentialPrfInput, MakeCredentialPrfOutput, MakeCredentialRequest, MakeCredentialResponse,
-    MakeCredentialsRequestExtensions, MakeCredentialsResponseExtensions,
-    MakeCredentialsResponseUnsignedExtensions, ResidentKeyRequirement,
+    MakeCredentialLargeBlobExtension, MakeCredentialLargeBlobExtensionInput,
+    MakeCredentialLargeBlobExtensionOutput, MakeCredentialPrfInput, MakeCredentialPrfOutput,
+    MakeCredentialRequest, MakeCredentialResponse, MakeCredentialsRequestExtensions,
+    MakeCredentialsResponseExtensions, MakeCredentialsResponseUnsignedExtensions,
+    ResidentKeyRequirement,
 };
 use serde::Deserialize;
 

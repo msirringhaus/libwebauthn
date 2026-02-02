@@ -229,7 +229,7 @@ impl UpgradableResponse<GetAssertionResponse, SignRequest> for SignResponse {
             },
             timeout: request.timeout,
         };
-        let upgraded_response = [response.into_assertion_output(&orig_request, None)]
+        let upgraded_response = [response.into_assertion_output(&orig_request, None, None)?]
             .as_slice()
             .into();
 

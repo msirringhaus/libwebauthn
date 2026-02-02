@@ -7,9 +7,10 @@ use super::{
 use crate::{
     fido::AuthenticatorData,
     ops::webauthn::{
-        CredentialProtectionPolicy, MakeCredentialLargeBlobExtension, MakeCredentialRequest,
-        MakeCredentialResponse, MakeCredentialsRequestExtensions,
-        MakeCredentialsResponseUnsignedExtensions, ResidentKeyRequirement,
+        CredentialProtectionPolicy, MakeCredentialLargeBlobExtension,
+        MakeCredentialLargeBlobExtensionInput, MakeCredentialRequest, MakeCredentialResponse,
+        MakeCredentialsRequestExtensions, MakeCredentialsResponseUnsignedExtensions,
+        ResidentKeyRequirement,
     },
     pin::PinUvAuthProtocol,
     proto::CtapError,
@@ -177,13 +178,25 @@ impl Ctap2MakeCredentialRequest {
 
 #[derive(Debug, Default, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+/// CTAP 2.2 extension, not to be confused with CTAP 2.1 extension 'largeBlobKey'
+pub struct Ctap2MakeCredentialsLargeBlobExtension {
+    // A DOMString that takes one of the values of LargeBlobSupport. (See § 2.1.1 Enumerations as DOMString types.)
+    // Only valid during registration.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    support: Option<String>,
+}
+
+#[derive(Debug, Default, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Ctap2MakeCredentialsRequestExtensions {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cred_protect: Option<Ctap2CredentialProtectionPolicy>,
     #[serde(skip_serializing_if = "Option::is_none", with = "serde_bytes")]
     pub cred_blob: Option<Vec<u8>>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub large_blob_key: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub large_blob_key: Option<bool>,
+    pub large_blob: Option<Ctap2MakeCredentialsLargeBlobExtension>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub min_pin_length: Option<bool>,
     // Thanks, FIDO-spec for this consistent naming scheme...
@@ -195,7 +208,7 @@ impl Ctap2MakeCredentialsRequestExtensions {
     pub fn skip_serializing(&self) -> bool {
         self.cred_protect.is_none()
             && self.cred_blob.is_none()
-            && self.large_blob_key.is_none()
+            && self.large_blob_key == false
             && self.min_pin_length.is_none()
             && self.hmac_secret.is_none()
     }
@@ -222,33 +235,70 @@ impl Ctap2MakeCredentialsRequestExtensions {
             }
         }
 
-        // LargeBlob (NOTE: Not to be confused with LargeBlobKey. LargeBlob has "Preferred" as well)
-        // https://developer.mozilla.org/en-US/docs/Web/API/Web_Authentication_API/WebAuthn_extensions#largeblob
-        //
-        let large_blob_key = match requested_extensions
-            .large_blob
-            .as_ref()
-            .map(|info| info.support)
-        {
-            Some(MakeCredentialLargeBlobExtension::Required) => {
-                // "required": The credential will be created with an authenticator to store blobs. The create() call will fail if this is impossible.
-                if !info.option_enabled("largeBlobs") {
-                    warn!("This request will potentially fail. Large blob extension required, but device does not support it.");
-                }
-                // We still send the request to the device and let it sort it out.
-                // We only add a warning for easier debugging.
-                Some(true)
-            }
-            Some(MakeCredentialLargeBlobExtension::Preferred) => {
-                if info.option_enabled("largeBlobs") {
-                    Some(true)
+        let (large_blob_key, large_blob) = match requested_extensions.large_blob {
+            Some(_) => {
+                // Two different largeBlob-extensions exist.
+                // Authenticators MUST NOT support both extensions.
+                // Deciding here which extension to use, depending on which the authenticator supports
+                //
+                // Platforms can detect support for largeBlobKey extension by checking for all of the following in the authenticatorGetInfo response:
+                //     largeBlobKey in the extensions field.
+                //     largeBlobs mapped to true in the options field.
+                //
+                // GetInfo:
+                // If largeBlobs is:
+                // present and set to true
+                //     the authenticator supports the authenticatorLargeBlobs command.
+                // present and set to false, or absent.
+                //     The authenticatorLargeBlobs command is NOT supported.
+                // This option MUST NOT be set to true if the largeBlob extension is supported instead.
+                //
+                let supports_large_blob_key_extension =
+                    info.supports_extensions("largeBlobKey") && info.option_enabled("largeBlobs");
+
+                let supports_large_blob_extension =
+                    info.supports_extensions("largeBlob") && !info.option_enabled("largeBlobs");
+
+                let large_blob_extension_preferred = requested_extensions.large_blob
+                    == Some(MakeCredentialLargeBlobExtensionInput {
+                        support: MakeCredentialLargeBlobExtension::Preferred,
+                    });
+
+                let large_blob_extension_required = requested_extensions.large_blob
+                    == Some(MakeCredentialLargeBlobExtensionInput {
+                        support: MakeCredentialLargeBlobExtension::Required,
+                    });
+                let large_blob_extension_requested =
+                    large_blob_extension_required || large_blob_extension_preferred;
+
+                if (large_blob_extension_preferred)
+                    && (!supports_large_blob_extension && !supports_large_blob_key_extension)
+                {
+                    // Dropping largeBlob request, as authenticator doesn't support it and it's only preferred
+                    (false, None)
+                } else if (large_blob_extension_required)
+                    && (!supports_large_blob_extension && !supports_large_blob_key_extension)
+                {
+                    warn!("Large blob extension required, but device does not support it.");
+                    return Err(Error::Ctap(CtapError::UnsupportedExtension));
+                } else if large_blob_extension_requested && supports_large_blob_key_extension {
+                    (true, None)
+                } else if large_blob_extension_requested && supports_large_blob_extension {
+                    if let Some(blob) = &requested_extensions.large_blob {
+                        (
+                            false,
+                            Some(Ctap2MakeCredentialsLargeBlobExtension {
+                                support: blob.support.to_string(),
+                            }),
+                        )
+                    } else {
+                        (false, None)
+                    }
                 } else {
-                    // The device does not support large blobs, so we try to not even mention it in the
-                    // final request, to avoid the possibility of weird devices failing.
-                    None
+                    (false, None)
                 }
             }
-            _ => None,
+            None => (false, None),
         };
 
         // HMAC Secret
@@ -271,6 +321,7 @@ impl Ctap2MakeCredentialsRequestExtensions {
                 .as_ref()
                 .map(|x| x.policy.clone().into()),
             large_blob_key,
+            large_blob,
             min_pin_length: requested_extensions.min_pin_length,
         })
     }
@@ -313,7 +364,6 @@ impl Ctap2MakeCredentialResponse {
             authenticator_data: self.authenticator_data,
             attestation_statement: self.attestation_statement,
             enterprise_attestation: self.enterprise_attestation,
-            large_blob_key: self.large_blob_key.map(|x| x.into_vec()),
             unsigned_extensions_output,
         }
     }

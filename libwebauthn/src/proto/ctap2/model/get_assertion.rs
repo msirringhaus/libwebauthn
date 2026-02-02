@@ -153,42 +153,67 @@ impl Ctap2GetAssertionRequest {
     ) -> Result<Self, Error> {
         // Cloning it, so we can modify it
         let mut req = req.clone();
-        // LargeBlob (NOTE: Not to be confused with LargeBlobKey)
-        // https://w3c.github.io/webauthn/#sctn-large-blob-extension
-        // If read is present and has the value true:
-        // [..]
-        // 3. If successful, set blob to the result.
-        //
-        // So we silently drop the extension if the device does not support it.
-        if !info.option_enabled("largeBlobs") {
-            if let Some(ref mut ext) = req.extensions {
+        if let Some(ext) = req.extensions.as_mut() {
+            // Platforms can detect support for this extension by checking for all of the following in the authenticatorGetInfo response:
+            //     largeBlobKey in the extensions field.
+            //     largeBlobs mapped to true in the options field.
+            //
+            // GetInfo:
+            // If largeBlobs is:
+            // present and set to true
+            //     the authenticator supports the authenticatorLargeBlobs command.
+            // present and set to false, or absent.
+            //     The authenticatorLargeBlobs command is NOT supported.
+            // This option MUST NOT be set to true if the largeBlob extension is supported instead.
+            let supports_large_blob_key_extension =
+                info.supports_extensions("largeBlobKey") && info.option_enabled("largeBlobs");
+
+            let supports_large_blob_extension =
+                info.supports_extensions("largeBlob") && !info.option_enabled("largeBlobs");
+
+            let large_blob_extension_requested = ext.large_blob.is_some();
+
+            if large_blob_extension_requested
+                && (!supports_large_blob_extension && !supports_large_blob_key_extension)
+            {
                 ext.large_blob = None;
             }
         }
 
-        Ok(Ctap2GetAssertionRequest::from(req))
-    }
-}
-
-impl From<GetAssertionRequest> for Ctap2GetAssertionRequest {
-    fn from(op: GetAssertionRequest) -> Self {
-        let client_data_hash = ByteBuf::from(op.client_data_hash());
-        Self {
-            relying_party_id: op.relying_party_id,
+        let client_data_hash = ByteBuf::from(req.client_data_hash());
+        Ok(Self {
+            relying_party_id: req.relying_party_id,
             client_data_hash,
-            allow: op.allow,
-            extensions: op.extensions.map(|ext| ext.into()),
+            allow: req.allow,
+            extensions: req
+                .extensions
+                .map(|x| Ctap2GetAssertionRequestExtensions::from_webauthn_request(&x, info)),
             options: Some(Ctap2GetAssertionOptions {
                 require_user_presence: true,
-                require_user_verification: op.user_verification.is_required(),
+                require_user_verification: req.user_verification.is_required(),
             }),
             pin_auth_param: None,
             pin_auth_proto: None,
-        }
+        })
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Default, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+/// CTAP 2.2 extension, not to be confused with CTAP 2.1 extension 'largeBlobKey'
+pub struct Ctap2GetAssertionLargeBlobExtension {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    // A boolean that indicates that the Relying Party would like to fetch the previously-written blob associated with the asserted credential.
+    // Only valid during authentication.
+    read: Option<bool>,
+
+    // An opaque byte string that the Relying Party wishes to store with the existing credential.
+    // Only valid during authentication.
+    #[serde(skip_serializing_if = "Option::is_none", with = "serde_bytes")]
+    write: Option<Vec<u8>>,
+}
+
+#[derive(Debug, Default, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Ctap2GetAssertionRequestExtensions {
     #[serde(skip_serializing_if = "std::ops::Not::not")]
@@ -196,33 +221,66 @@ pub struct Ctap2GetAssertionRequestExtensions {
     // Thanks, FIDO-spec for this consistent naming scheme...
     #[serde(rename = "hmac-secret", skip_serializing_if = "Option::is_none")]
     pub hmac_secret: Option<CalculatedHMACGetSecretInput>,
-    // From which we calculate hmac_secret
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub large_blob_key: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub large_blob_key: Option<bool>,
+    pub large_blob: Option<Ctap2GetAssertionLargeBlobExtension>,
     #[serde(skip)]
     pub(crate) hmac_or_prf: Option<GetAssertionHmacOrPrfInput>,
 }
 
-impl From<GetAssertionRequestExtensions> for Ctap2GetAssertionRequestExtensions {
-    fn from(other: GetAssertionRequestExtensions) -> Self {
-        Ctap2GetAssertionRequestExtensions {
-            cred_blob: other.cred_blob,
-            hmac_secret: None, // Gets calculated later
-            hmac_or_prf: other.prf.map(GetAssertionHmacOrPrfInput::Prf),
-            large_blob_key: if other.large_blob == Some(GetAssertionLargeBlobExtension::Read) {
-                Some(true)
+impl Ctap2GetAssertionRequestExtensions {
+    pub(crate) fn from_webauthn_request(
+        req: &GetAssertionRequestExtensions,
+        info: &Ctap2GetInfoResponse,
+    ) -> Self {
+        // CTAP 2.1 largeBlobKey extension
+        // If we have to request the largeBlobKey:
+        //  1. largeBlobs were requested in some form
+        //  2. the authenticator supports this extension and not
+        //     the CTAP 2.2 'largeBlob'-extensions
+        let large_blob_key = req.large_blob.is_some()
+            && info.option_enabled("largeBlobs")
+            && info.supports_extensions("largeBlobKey")
+            && !info.supports_extensions("largeBlob");
+
+        // CTAP 2.2 largeBlob extension
+        // https://fidoalliance.org/specs/fido-v2.2-ps-20250714/fido-client-to-authenticator-protocol-v2.2-ps-20250714.html#sctn-largeBlob-extension
+        // This extension is an alternative to the to authenticatorLargeBlobs command and the largeBlobKey extension for authenticators that can accept the full contents of a largeBlob in an authenticatorGetAssertion message. Authenticators MUST NOT support both extensions.
+        let large_blob =
+            if info.supports_extensions("largeBlob") && info.option_enabled("largeBlobs") {
+                match &req.large_blob {
+                    None => None,
+                    Some(GetAssertionLargeBlobExtension::Read) => {
+                        Some(Ctap2GetAssertionLargeBlobExtension {
+                            read: Some(true),
+                            ..Default::default()
+                        })
+                    }
+                    Some(GetAssertionLargeBlobExtension::Write(items)) => {
+                        Some(Ctap2GetAssertionLargeBlobExtension {
+                            write: Some(items.to_vec()),
+                            ..Default::default()
+                        })
+                    }
+                }
             } else {
                 None
-            },
+            };
+
+        Ctap2GetAssertionRequestExtensions {
+            cred_blob: req.cred_blob,
+            hmac_secret: None, // Get's calculated later
+            hmac_or_prf: req.prf.clone().map(GetAssertionHmacOrPrfInput::Prf),
+            large_blob_key,
+            large_blob,
         }
     }
-}
 
-impl Ctap2GetAssertionRequestExtensions {
     pub fn skip_serializing(&self) -> bool {
         !self.cred_blob
             && self.hmac_secret.is_none()
-            && self.large_blob_key.is_none()
+            && self.large_blob_key == false
             && self.hmac_or_prf.is_none()
     }
 
@@ -436,7 +494,21 @@ impl Ctap2UserVerifiableRequest for Ctap2GetAssertionRequest {
     }
 
     fn permissions(&self) -> Ctap2AuthTokenPermissionRole {
-        Ctap2AuthTokenPermissionRole::GET_ASSERTION
+        let mut perm = Ctap2AuthTokenPermissionRole::GET_ASSERTION;
+        if let Some(ext) = self.extensions.as_ref() {
+            if ext.large_blob_key
+                || matches!(
+                    ext.large_blob,
+                    Some(Ctap2GetAssertionLargeBlobExtension {
+                        read: _,
+                        write: Some(_)
+                    })
+                )
+            {
+                perm |= Ctap2AuthTokenPermissionRole::LARGE_BLOB_WRITE;
+            }
+        }
+        perm
     }
 
     fn permissions_rpid(&self) -> Option<&str> {
@@ -471,12 +543,19 @@ impl Ctap2GetAssertionResponse {
         self,
         request: &GetAssertionRequest,
         auth_data: Option<&AuthTokenData>,
-    ) -> Assertion {
-        let unsigned_extensions_output = self
+        large_blob: Option<GetAssertionLargeBlobExtensionOutput>,
+    ) -> Result<Assertion, Error> {
+        let mut unsigned_extensions_output = self
             .authenticator_data
             .extensions
             .as_ref()
             .map(|x| x.to_unsigned_extensions(request, &self, auth_data));
+
+        if large_blob.is_some() {
+            let mut output = unsigned_extensions_output.unwrap_or_default();
+            output.large_blob = large_blob;
+            unsigned_extensions_output = Some(output);
+        }
         // CTAP2 6.2.2: authenticators may omit credential ID when the allow list has one entry.
         // We always return it, for convenience.
         let credential_id = self.credential_id.or_else(|| {
@@ -486,7 +565,7 @@ impl Ctap2GetAssertionResponse {
                 None
             }
         });
-        Assertion {
+        Ok(Assertion {
             credential_id,
             authenticator_data: self.authenticator_data,
             signature: self.signature.into_vec(),
@@ -497,7 +576,7 @@ impl Ctap2GetAssertionResponse {
             unsigned_extensions_output,
             enterprise_attestation: self.enterprise_attestation,
             attestation_statement: self.attestation_statement,
-        }
+        })
     }
 }
 
@@ -521,7 +600,7 @@ impl Ctap2GetAssertionResponseExtensions {
     pub(crate) fn to_unsigned_extensions(
         &self,
         request: &GetAssertionRequest,
-        response: &Ctap2GetAssertionResponse,
+        _response: &Ctap2GetAssertionResponse,
         auth_data: Option<&AuthTokenData>,
     ) -> GetAssertionResponseUnsignedExtensions {
         let decrypted_hmac = self.hmac_secret.as_ref().and_then(|x| {
@@ -548,23 +627,9 @@ impl Ctap2GetAssertionResponseExtensions {
                 })
         });
 
-        // LargeBlobs was requested
-        let large_blob = request
-            .extensions
-            .as_ref()
-            .and_then(|ext| ext.large_blob.as_ref())
-            .map(|_| GetAssertionLargeBlobExtensionOutput {
-                blob: response
-                    .large_blob_key
-                    .as_ref()
-                    .map(|x| x.clone().into_vec()),
-                // Not yet supported
-                // written: None,
-            });
-
         GetAssertionResponseUnsignedExtensions {
             hmac_get_secret: None,
-            large_blob,
+            large_blob: None, // Might get set later
             prf,
         }
     }
@@ -626,7 +691,9 @@ mod tests {
         let response = make_response(None);
         let request = make_request(vec![cred.clone()]);
 
-        let assertion = response.into_assertion_output(&request, None);
+        let assertion = response
+            .into_assertion_output(&request, None, None)
+            .unwrap();
         assert_eq!(assertion.credential_id, Some(cred));
     }
 
@@ -637,7 +704,9 @@ mod tests {
         let response = make_response(Some(existing.clone()));
         let request = make_request(vec![allow_entry]);
 
-        let assertion = response.into_assertion_output(&request, None);
+        let assertion = response
+            .into_assertion_output(&request, None, None)
+            .unwrap();
         assert_eq!(assertion.credential_id, Some(existing));
     }
 
@@ -646,7 +715,9 @@ mod tests {
         let response = make_response(None);
         let request = make_request(vec![make_credential(b"a"), make_credential(b"b")]);
 
-        let assertion = response.into_assertion_output(&request, None);
+        let assertion = response
+            .into_assertion_output(&request, None, None)
+            .unwrap();
         assert_eq!(assertion.credential_id, None);
     }
 
@@ -655,7 +726,9 @@ mod tests {
         let response = make_response(None);
         let request = make_request(vec![]);
 
-        let assertion = response.into_assertion_output(&request, None);
+        let assertion = response
+            .into_assertion_output(&request, None, None)
+            .unwrap();
         assert_eq!(assertion.credential_id, None);
     }
 }

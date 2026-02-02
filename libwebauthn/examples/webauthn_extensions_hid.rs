@@ -10,9 +10,11 @@ use tokio::sync::broadcast::Receiver;
 use tracing_subscriber::{self, EnvFilter};
 
 use libwebauthn::ops::webauthn::{
-    CredentialProtectionExtension, CredentialProtectionPolicy, GetAssertionRequest,
-    GetAssertionRequestExtensions, MakeCredentialRequest, MakeCredentialsRequestExtensions,
-    PRFValue, PrfInput, ResidentKeyRequirement, UserVerificationRequirement,
+    CredentialProtectionExtension, CredentialProtectionPolicy, GetAssertionHmacOrPrfInput,
+    GetAssertionLargeBlobExtension, GetAssertionRequest, GetAssertionRequestExtensions,
+    HMACGetSecretInput, MakeCredentialLargeBlobExtension, MakeCredentialRequest,
+    MakeCredentialsRequestExtensions, PRFValue, PrfInput, ResidentKeyRequirement,
+    UserVerificationRequirement,
 };
 use libwebauthn::pin::PinRequestReason;
 use libwebauthn::proto::ctap2::{
@@ -88,7 +90,11 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
             enforce_policy: true,
         }),
         cred_blob: Some("My own little blob".as_bytes().into()),
-        large_blob: None,
+        large_blob: Some(
+            libwebauthn::ops::webauthn::MakeCredentialLargeBlobExtensionInput {
+                support: MakeCredentialLargeBlobExtension::Preferred,
+            },
+        ),
         min_pin_length: Some(true),
         hmac_create_secret: Some(true),
         prf: None,
@@ -135,10 +141,14 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
             };
         }
         .unwrap();
-        // println!("WebAuthn MakeCredential response: {:?}", response);
+
         println!(
             "WebAuthn MakeCredential extensions: {:?}",
             response.authenticator_data.extensions
+        );
+        println!(
+            "WebAuthn MakeCredential unsigned extensions: {:?}",
+            response.unsigned_extensions_output
         );
 
         let credential: Ctap2PublicKeyCredentialDescriptor =
@@ -148,8 +158,9 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
             challenge: Vec::from(challenge),
             origin: "example.org".to_string(),
             cross_origin: None,
-            allow: vec![credential],
-            user_verification: UserVerificationRequirement::Discouraged,
+            // allow: vec![credential.clone()],
+            allow: vec![],
+            user_verification: UserVerificationRequirement::Preferred,
             extensions: Some(GetAssertionRequestExtensions {
                 cred_blob: true,
                 prf: Some(PrfInput {
@@ -159,6 +170,54 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
                     }),
                     eval_by_credential: std::collections::HashMap::new(),
                 }),
+                large_blob: Some(GetAssertionLargeBlobExtension::Write(
+                    b"This is our very large blob".to_vec(),
+                )),
+            }),
+            timeout: TIMEOUT,
+        };
+
+        let response = loop {
+            match channel.webauthn_get_assertion(&get_assertion).await {
+                Ok(response) => break Ok(response),
+                Err(WebAuthnError::Ctap(ctap_error)) => {
+                    if ctap_error.is_retryable_user_error() {
+                        println!("Oops, try again! Error: {}", ctap_error);
+                        continue;
+                    }
+                    break Err(WebAuthnError::Ctap(ctap_error));
+                }
+                Err(err) => break Err(err),
+            };
+        }
+        .unwrap();
+
+        println!(
+            "WebAuthn GetAssertion extensions: {:?}",
+            response.assertions[0].authenticator_data.extensions
+        );
+        println!(
+            "WebAuthn GetAssertion unsigned extensions: {:?}",
+            response.assertions[0].unsigned_extensions_output
+        );
+        let blob = if let Some(ext) = &response.assertions[0].authenticator_data.extensions {
+            ext.cred_blob
+                .clone()
+                .map(|x| String::from_utf8_lossy(&x).to_string())
+        } else {
+            None
+        };
+        println!("Credential blob: {blob:?}");
+
+        let get_assertion = GetAssertionRequest {
+            relying_party_id: "example.org".to_string(),
+            challenge: Vec::from(challenge),
+            origin: "example.org".to_string(),
+            cross_origin: None,
+            allow: vec![],
+            user_verification: UserVerificationRequirement::Preferred,
+            extensions: Some(GetAssertionRequestExtensions {
+                large_blob: Some(GetAssertionLargeBlobExtension::Read),
                 ..Default::default()
             }),
             timeout: TIMEOUT,
@@ -180,17 +239,18 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
         .unwrap();
         // println!("WebAuthn GetAssertion response: {:?}", response);
         println!(
-            "WebAuthn GetAssertion extensions: {:?}",
-            response.assertions[0].authenticator_data.extensions
+            "WebAuthn GetAssertion unsigned extensions: {:?}",
+            response.assertions[0].unsigned_extensions_output
         );
-        let blob = if let Some(ext) = &response.assertions[0].authenticator_data.extensions {
-            ext.cred_blob
+        let blob = if let Some(ext) = &response.assertions[0].unsigned_extensions_output {
+            ext.large_blob
                 .clone()
+                .and_then(|x| x.blob)
                 .map(|x| String::from_utf8_lossy(&x).to_string())
         } else {
             None
         };
-        println!("Credential blob: {blob:?}");
+        println!("Large blob: {blob:?}");
     }
 
     Ok(())

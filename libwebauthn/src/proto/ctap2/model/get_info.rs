@@ -259,6 +259,14 @@ impl Ctap2GetInfoResponse {
             }
         }
     }
+
+    pub fn supports_extensions(&self, extension: &str) -> bool {
+        if let Some(extensions) = &self.extensions {
+            extensions.contains(&extension.to_string())
+        } else {
+            false
+        }
+    }
 }
 
 #[cfg(test)]

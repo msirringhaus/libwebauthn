@@ -39,4 +39,6 @@ pub enum PlatformError {
     CryptoError(String),
     #[error("cancelled by user")]
     Cancelled,
+    #[error("Internal error")]
+    InternalError,
 }

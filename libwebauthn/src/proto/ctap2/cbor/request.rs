@@ -8,6 +8,7 @@ use crate::proto::ctap2::model::Ctap2MakeCredentialRequest;
 use crate::proto::ctap2::Ctap2AuthenticatorConfigRequest;
 use crate::proto::ctap2::Ctap2BioEnrollmentRequest;
 use crate::proto::ctap2::Ctap2CredentialManagementRequest;
+use crate::proto::ctap2::Ctap2LargeBlobsRequest;
 use crate::webauthn::Error;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -104,5 +105,14 @@ impl TryFrom<&Ctap2CredentialManagementRequest> for CborRequest {
             command,
             encoded_data: cbor::to_vec(&request)?,
         })
+    }
+}
+
+impl From<&Ctap2LargeBlobsRequest> for CborRequest {
+    fn from(request: &Ctap2LargeBlobsRequest) -> CborRequest {
+        CborRequest {
+            command: Ctap2CommandCode::AuthenticatorLargeBlobs,
+            encoded_data: cbor::to_vec(&request).unwrap(),
+        }
     }
 }
